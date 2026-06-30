@@ -139,8 +139,9 @@ export function KVStore() {
 
   // Load KV data on mount and when connection changes
   useEffect(() => {
-    fetchKVData();
-    
+    const run = async () => { await fetchKVData(); };
+    run();
+
     // Refresh data every 10 seconds when connected
     if (isConnected) {
       const interval = setInterval(fetchKVData, 10000);

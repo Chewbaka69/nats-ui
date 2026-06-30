@@ -88,6 +88,35 @@ function MetricCard({ title, value, description, icon, trend }: MetricCardProps)
   );
 }
 
+function parseUptimeToSeconds(uptimeStr: string): number {
+  if (!uptimeStr) return 0;
+
+  let totalSeconds = 0;
+  const dayMatch = uptimeStr.match(/(\d+)d/);
+  const hourMatch = uptimeStr.match(/(\d+)h/);
+  const minMatch = uptimeStr.match(/(\d+)m/);
+  const secMatch = uptimeStr.match(/(\d+)s/);
+
+  if (dayMatch) totalSeconds += parseInt(dayMatch[1]) * 86400;
+  if (hourMatch) totalSeconds += parseInt(hourMatch[1]) * 3600;
+  if (minMatch) totalSeconds += parseInt(minMatch[1]) * 60;
+  if (secMatch) totalSeconds += parseInt(secMatch[1]);
+
+  return totalSeconds;
+}
+
+function formatUptimeFromSeconds(totalSeconds: number): string {
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 export default function Dashboard() {
   const { isConnected, status, error, config } = useNats();
   const [serverInfo, setServerInfo] = useState<Record<string, unknown> | null>(null);
@@ -96,8 +125,8 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [uptimeOffset, setUptimeOffset] = useState<number>(0);
-  const [lastFetchTime, setLastFetchTime] = useState<number>(Date.now());
-  const [currentTime, setCurrentTime] = useState<number>(Date.now());
+  const [lastFetchTime, setLastFetchTime] = useState<number>(() => Date.now());
+  const [currentTime, setCurrentTime] = useState<number>(() => Date.now());
 
   // Fetch real NATS metrics
   const fetchMetrics = useCallback(async () => {
@@ -138,8 +167,9 @@ export default function Dashboard() {
   }, [isConnected, initialLoading]);
 
   useEffect(() => {
-    fetchMetrics();
-    
+    const run = async () => { await fetchMetrics(); };
+    run();
+
     // Refresh metrics every 5 seconds when connected
     if (isConnected) {
       const interval = setInterval(fetchMetrics, 5000);
@@ -158,35 +188,6 @@ export default function Dashboard() {
       return () => clearInterval(interval);
     }
   }, [isConnected]);
-
-  function parseUptimeToSeconds(uptimeStr: string): number {
-    if (!uptimeStr) return 0;
-    
-    let totalSeconds = 0;
-    const dayMatch = uptimeStr.match(/(\d+)d/);
-    const hourMatch = uptimeStr.match(/(\d+)h/);
-    const minMatch = uptimeStr.match(/(\d+)m/);
-    const secMatch = uptimeStr.match(/(\d+)s/);
-    
-    if (dayMatch) totalSeconds += parseInt(dayMatch[1]) * 86400;
-    if (hourMatch) totalSeconds += parseInt(hourMatch[1]) * 3600;
-    if (minMatch) totalSeconds += parseInt(minMatch[1]) * 60;
-    if (secMatch) totalSeconds += parseInt(secMatch[1]);
-    
-    return totalSeconds;
-  }
-
-  function formatUptimeFromSeconds(totalSeconds: number): string {
-    const days = Math.floor(totalSeconds / 86400);
-    const hours = Math.floor((totalSeconds % 86400) / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    
-    if (days > 0) return `${days}d ${hours}h ${minutes}m`;
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    if (minutes > 0) return `${minutes}m ${seconds}s`;
-    return `${seconds}s`;
-  }
 
   // function formatUptime(uptimeStr: string): string {
   //   if (!uptimeStr) return '0s';

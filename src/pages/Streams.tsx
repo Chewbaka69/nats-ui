@@ -245,7 +245,8 @@ export function Streams() {
 
   // Load streams on mount and when connection changes
   useEffect(() => {
-    fetchStreams(true); // Initial load with loading state
+    const run = async () => { await fetchStreams(true); }; // Initial load with loading state
+    run();
 
     // Refresh streams every 10 seconds when connected
     if (isConnected) {

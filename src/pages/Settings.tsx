@@ -40,8 +40,11 @@ type ConnectionFormData = z.infer<typeof connectionSchema>;
 
 export function Settings() {
   const { config, updateConfig, status, error } = useNats();
-  const [httpStatus, setHttpStatus] = useState<'checking' | 'available' | 'error' | 'unconfigured'>('unconfigured');
-  const [httpError, setHttpError] = useState<string | null>(null);
+  const [rawHttpStatus, setHttpStatus] = useState<'checking' | 'available' | 'error' | 'unconfigured'>('unconfigured');
+  const [rawHttpError, setHttpError] = useState<string | null>(null);
+  // When there is no HTTP URL configured, the status is purely derived.
+  const httpStatus = config.httpUrl ? rawHttpStatus : 'unconfigured';
+  const httpError = config.httpUrl ? rawHttpError : null;
   const [settings, setSettings] = useState({
     notifications: {
       connectionEvents: true,
@@ -93,12 +96,10 @@ export function Settings() {
   }, []);
 
   useEffect(() => {
-    if (config.httpUrl) {
-      checkHttpStatus(config.httpUrl);
-    } else {
-      setHttpStatus('unconfigured');
-      setHttpError(null);
-    }
+    const httpUrl = config.httpUrl;
+    if (!httpUrl) return;
+    const run = async () => { await checkHttpStatus(httpUrl); };
+    run();
   }, [config.httpUrl, checkHttpStatus]);
 
   const form = useForm<ConnectionFormData>({

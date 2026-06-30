@@ -280,9 +280,10 @@ export function Monitoring() {
 
   useEffect(() => {
     if (!isConnected) return;
-    
-    fetchMetrics();
-    
+
+    const run = async () => { await fetchMetrics(); };
+    run();
+
     // Refresh metrics every 5 seconds when connected
     const interval = setInterval(() => {
       fetchMetrics();

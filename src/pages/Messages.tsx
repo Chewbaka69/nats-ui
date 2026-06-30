@@ -590,8 +590,9 @@ const MessagesComponent = function Messages() {
     if (!isConnected) return;
     
     // Initial fetch
-    fetchTopics();
-    
+    const run = async () => { await fetchTopics(); };
+    run();
+
     // Server topics: Poll every 30 seconds (less frequent to reduce HTTP calls)
     const serverInterval = setInterval(async () => {
       // Only fetch server topics, subject tracker updates will be handled separately
@@ -651,7 +652,7 @@ const MessagesComponent = function Messages() {
   useEffect(() => {
     if (!isConnected) return;
     
-    let debounceTimeout: NodeJS.Timeout;
+    let debounceTimeout: ReturnType<typeof setTimeout>;
     let lastUpdateTime = 0;
     
     const unsubscribe = subjectTracker.subscribe(() => {

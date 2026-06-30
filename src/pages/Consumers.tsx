@@ -124,8 +124,9 @@ export function Consumers() {
 
   // Load consumers on mount and when connection changes
   useEffect(() => {
-    fetchConsumers();
-    
+    const run = async () => { await fetchConsumers(); };
+    run();
+
     // Refresh consumers every 10 seconds when connected
     if (isConnected) {
       const interval = setInterval(fetchConsumers, 10000);
