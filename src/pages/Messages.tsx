@@ -811,7 +811,7 @@ const MessagesComponent = function Messages() {
               </CardContent>
             </Card>
           ) : (
-            <div className="flex-1 flex flex-col gap-6 min-h-0">
+            <div className="flex-1 flex flex-col gap-6 min-h-0 overflow-y-auto">
               {/* Publish to Topic - Collapsible */}
               <Collapsible 
                 open={isPublishExpanded} 
@@ -863,6 +863,7 @@ const MessagesComponent = function Messages() {
                             id="publish-data"
                             placeholder="Enter message content..."
                             rows={3}
+                            className="max-h-[40vh] overflow-y-auto"
                             {...publishForm.register('data')}
                           />
                         </div>
@@ -873,6 +874,7 @@ const MessagesComponent = function Messages() {
                             id="publish-headers"
                             placeholder='{"Content-Type": "application/json"}'
                             rows={2}
+                            className="max-h-[20vh] overflow-y-auto"
                             {...publishForm.register('headers')}
                           />
                         </div>
@@ -892,7 +894,7 @@ const MessagesComponent = function Messages() {
               </Collapsible>
 
               {/* Messages Display - Takes remaining space */}
-              <Card className="flex-1 flex flex-col min-h-0 overflow-hidden">
+              <Card className="flex-1 flex flex-col min-h-[18rem] overflow-hidden">
                 <CardHeader className="flex-shrink-0 flex flex-row items-center justify-between">
                   <div>
                     <CardTitle className="flex items-center gap-2">
@@ -970,14 +972,14 @@ const MessagesComponent = function Messages() {
                 <CardContent className="flex-1 overflow-hidden px-6">
                   <div className="h-full overflow-y-auto">
                     {filteredMessages.length === 0 ? (
-                      <div className="flex items-center justify-center h-full min-h-[400px] pb-12">
-                        <div className="text-center space-y-6">
-                          <div className="space-y-4">
-                            <MessageSquare className="h-16 w-16 mx-auto text-muted-foreground" />
-                            <div className="space-y-3">
+                      <div className="flex items-center justify-center h-full min-h-0">
+                        <div className="text-center space-y-4">
+                          <div className="space-y-2">
+                            <MessageSquare className="h-12 w-12 mx-auto text-muted-foreground" />
+                            <div className="space-y-2">
                               <h3 className="text-lg font-semibold text-center">No messages yet</h3>
                               <p className="text-sm text-muted-foreground text-center max-w-sm mx-auto leading-relaxed">
-                                {subscriptions.some(s => s.subject === selectedTopic && s.isActive) 
+                                {subscriptions.some(s => s.subject === selectedTopic && s.isActive)
                                   ? "Waiting for messages on this topic..."
                                   : "Subscribe to this topic to start receiving messages"}
                               </p>
