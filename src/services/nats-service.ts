@@ -1,4 +1,4 @@
-import { connect, type NatsConnection, headers as createHeaders, type MsgHdrs } from 'nats.ws';
+import { wsconnect, type NatsConnection, headers as createHeaders, type MsgHdrs } from '@nats-io/nats-core';
 import { toast } from 'sonner';
 import { subjectTracker } from './subject-tracker';
 import { config } from '../config';
@@ -116,7 +116,7 @@ class RealNatsService implements NatsService {
 
 export async function createNatsService(servers: string[]): Promise<NatsService> {
   try {
-    const connection = await connect({
+    const connection = await wsconnect({
       servers,
       timeout: 10000,
       name: 'NATS UI Client',
