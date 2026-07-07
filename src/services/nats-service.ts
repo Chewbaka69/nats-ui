@@ -1,46 +1,94 @@
-import { wsconnect, type NatsConnection, headers as createHeaders, type MsgHdrs } from '@nats-io/nats-core';
 import { toast } from 'sonner';
 import { subjectTracker } from './subject-tracker';
 import { config } from '../config';
 
+/**
+ * Frontend NATS service.
+ *
+ * The browser no longer connects to NATS directly. Every call goes through the
+ * backend API (`config.api.baseUrl`, default `/api`); the backend owns the NATS
+ * connection and can therefore reach a NATS server that is only accessible from
+ * the server host. Real-time subscriptions are multiplexed over a single
+ * WebSocket to the backend.
+ *
+ * The public shape (NatsService, JetStreamManager, createNatsService, and the
+ * fetch* helpers) is preserved so pages/components require no changes.
+ */
+
+export interface SubscribeMessage {
+  subject: string;
+  data: unknown;
+  headers?: Record<string, string>;
+  timestamp: number;
+  reply?: string;
+}
+
 export interface NatsService {
   publish: (subject: string, data: unknown, headers?: Record<string, string>) => Promise<void>;
-  subscribe: (subject: string, callback: (msg: { subject: string; data: unknown; headers?: Record<string, string>; timestamp: number; reply?: string }) => void) => Promise<() => void>;
+  subscribe: (subject: string, callback: (msg: SubscribeMessage) => void) => Promise<() => void>;
   close: () => Promise<void>;
   isClosed: () => boolean;
-  connection: NatsConnection;
   jetstream: JetStreamManager;
 }
 
-class RealNatsService implements NatsService {
-  private readonly subscriptions = new Map<string, () => void>();
-  public readonly jetstream: JetStreamManager;
-  public readonly connection: NatsConnection;
+export interface NatsConnectConfig {
+  server: string;
+  httpUrl?: string;
+  name?: string;
+  user?: string;
+  pass?: string;
+  token?: string;
+  timeout?: number;
+}
 
-  constructor(connection: NatsConnection) {
-    this.connection = connection;
-    this.jetstream = new JetStreamManager(connection);
+// The single active connection id, shared with the module-level fetch* helpers
+// (which are called from pages that don't hold a service instance).
+let activeConnectionId: string | null = null;
+
+function apiUrl(path: string): string {
+  return `${config.api.baseUrl}${path}`;
+}
+
+async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(apiUrl(path), {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+  });
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body?.error) message = body.error;
+    } catch {
+      // ignore body parse errors
+    }
+    throw new Error(message);
+  }
+  return response.json() as Promise<T>;
+}
+
+class RealNatsService implements NatsService {
+  public readonly jetstream: JetStreamManager;
+  private readonly connectionId: string;
+  private closed = false;
+
+  // Real-time WebSocket state.
+  private ws: WebSocket | null = null;
+  private readonly callbacks = new Map<string, Set<(msg: SubscribeMessage) => void>>();
+  private readonly pending: string[] = [];
+
+  constructor(connectionId: string) {
+    this.connectionId = connectionId;
+    this.jetstream = new JetStreamManager(connectionId);
   }
 
   async publish(subject: string, data: unknown, msgHeaders?: Record<string, string>): Promise<void> {
     const payload = typeof data === 'string' ? data : JSON.stringify(data);
-    const encodedData = new TextEncoder().encode(payload);
-
     try {
-      // Create headers if provided
-      const options: { headers?: MsgHdrs } = {};
-      if (msgHeaders && Object.keys(msgHeaders).length > 0) {
-        const h = createHeaders();
-        for (const [key, value] of Object.entries(msgHeaders)) {
-          h.append(key, value);
-        }
-        options.headers = h;
-      }
-
-      // Publish the message - this is synchronous but can throw
-      this.connection.publish(subject, encodedData, options);
-
-      // Track published subject after successful publish
+      await apiFetch(`/connections/${this.connectionId}/publish`, {
+        method: 'POST',
+        body: JSON.stringify({ subject, data, headers: msgHeaders }),
+      });
       subjectTracker.track(subject, payload);
     } catch (error) {
       console.error(`Failed to publish to subject ${subject}:`, error);
@@ -48,81 +96,127 @@ class RealNatsService implements NatsService {
     }
   }
 
-  async subscribe(subject: string, callback: (msg: { subject: string; data: unknown; headers?: Record<string, string>; timestamp: number; reply?: string }) => void): Promise<() => void> {
-    const sub = this.connection.subscribe(subject);
-    
-    // Process messages in background
-    (async () => {
-      for await (const msg of sub) {
-        try {
-          const data = new TextDecoder().decode(msg.data);
-          let parsedData: unknown;
-          
-          try {
-            parsedData = JSON.parse(data);
-          } catch {
-            parsedData = data;
-          }
+  async subscribe(subject: string, callback: (msg: SubscribeMessage) => void): Promise<() => void> {
+    this.ensureSocket();
 
-          // Track received subject
-          subjectTracker.track(msg.subject, typeof parsedData === 'string' ? parsedData : JSON.stringify(parsedData));
+    let set = this.callbacks.get(subject);
+    const isNewSubject = !set;
+    if (!set) {
+      set = new Set();
+      this.callbacks.set(subject, set);
+    }
+    set.add(callback);
 
-          // Extract headers if present
-          let headers: Record<string, string> | undefined;
-          if (msg.headers) {
-            headers = {};
-            // Convert Headers iterator to plain object
-            for (const [key, values] of msg.headers) {
-              headers[key] = Array.isArray(values) ? values[0] : values;
-            }
-          }
-
-          callback({
-            subject: msg.subject,
-            data: parsedData,
-            timestamp: Date.now(),
-            reply: msg.reply,
-            headers
-          });
-        } catch (error) {
-          console.error('Error processing message:', error);
-        }
-      }
-    })();
+    if (isNewSubject) {
+      this.sendFrame({ action: 'subscribe', subject });
+    }
 
     const unsubscribe = () => {
-      sub.unsubscribe();
-      this.subscriptions.delete(subject);
+      const callbacks = this.callbacks.get(subject);
+      if (!callbacks) return;
+      callbacks.delete(callback);
+      if (callbacks.size === 0) {
+        this.callbacks.delete(subject);
+        this.sendFrame({ action: 'unsubscribe', subject });
+      }
     };
 
-    this.subscriptions.set(subject, unsubscribe);
     return unsubscribe;
   }
 
-  async close(): Promise<void> {
-    // Unsubscribe from all subscriptions
-    for (const unsubscribe of this.subscriptions.values()) {
-      unsubscribe();
+  private ensureSocket(): void {
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
     }
-    this.subscriptions.clear();
-    
-    await this.connection.close();
+
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const base = config.api.baseUrl.startsWith('http')
+      ? config.api.baseUrl.replace(/^http/, 'ws')
+      : `${proto}//${window.location.host}${config.api.baseUrl}`;
+    const ws = new WebSocket(`${base}/connections/${this.connectionId}/subscribe`);
+    this.ws = ws;
+
+    ws.onopen = () => {
+      // Flush queued frames.
+      while (this.pending.length > 0) {
+        ws.send(this.pending.shift()!);
+      }
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const frame = JSON.parse(event.data);
+        if (frame.type !== 'message' || !frame.message) return;
+        const message = frame.message as SubscribeMessage;
+        subjectTracker.track(
+          message.subject,
+          typeof message.data === 'string' ? message.data : JSON.stringify(message.data),
+        );
+        const set = this.callbacks.get(frame.subject);
+        if (set) {
+          for (const cb of set) cb(message);
+        }
+      } catch (error) {
+        console.error('Error processing message:', error);
+      }
+    };
+
+    ws.onclose = () => {
+      if (this.ws === ws) this.ws = null;
+    };
+  }
+
+  private sendFrame(frame: Record<string, unknown>): void {
+    const data = JSON.stringify(frame);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(data);
+    } else {
+      this.pending.push(data);
+    }
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.callbacks.clear();
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+    if (activeConnectionId === this.connectionId) {
+      activeConnectionId = null;
+    }
+    try {
+      await apiFetch(`/connections/${this.connectionId}`, { method: 'DELETE' });
+    } catch (error) {
+      console.error('Failed to close connection:', error);
+    }
   }
 
   isClosed(): boolean {
-    return this.connection.isClosed();
+    return this.closed;
   }
 }
 
-export async function createNatsService(servers: string[]): Promise<NatsService> {
+export async function createNatsService(connectConfig: NatsConnectConfig): Promise<NatsService> {
   try {
-    const connection = await wsconnect({
-      servers,
-      timeout: 10000,
-      name: 'NATS UI Client',
+    const { connectionId } = await apiFetch<{ connectionId: string }>(`/connections`, {
+      method: 'POST',
+      body: JSON.stringify({
+        servers: [connectConfig.server],
+        name: connectConfig.name,
+        user: connectConfig.user,
+        pass: connectConfig.pass,
+        token: connectConfig.token,
+        timeout: connectConfig.timeout,
+        httpUrl: connectConfig.httpUrl,
+      }),
     });
-    return new RealNatsService(connection);
-    
+    activeConnectionId = connectionId;
+    return new RealNatsService(connectionId);
   } catch (error) {
     console.error('Failed to connect to NATS server:', error);
     toast.error(`Connection failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -130,100 +224,93 @@ export async function createNatsService(servers: string[]): Promise<NatsService>
   }
 }
 
-// Utility functions for NATS monitoring API
-export async function fetchNatsInfo(): Promise<Record<string, unknown> | null> {
+// ---- Monitoring helpers (proxied through the backend) --------------------
+
+async function fetchMonitoring<T>(what: string, query = ''): Promise<T | null> {
+  if (!activeConnectionId) return null;
   try {
-    const response = await fetch(`${config.nats.httpUrl}/varz`);
+    const response = await fetch(
+      apiUrl(`/connections/${activeConnectionId}/monitoring/${what}${query}`),
+    );
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
+    return (await response.json()) as T;
   } catch (error) {
-    console.warn('Could not fetch NATS info:', error);
+    console.warn(`Could not fetch NATS ${what}:`, error);
     return null;
   }
+}
+
+export async function fetchNatsInfo(): Promise<Record<string, unknown> | null> {
+  return fetchMonitoring<Record<string, unknown>>('varz');
 }
 
 export async function fetchNatsConnections(): Promise<Record<string, unknown> | null> {
-  try {
-    const response = await fetch(`${config.nats.httpUrl}/connz`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
-  } catch (error) {
-    console.warn('Could not fetch NATS connections:', error);
-    return null;
-  }
+  return fetchMonitoring<Record<string, unknown>>('connz');
 }
 
 export async function fetchJetStreamInfo(): Promise<Record<string, unknown> | null> {
-  try {
-    const response = await fetch(`${config.nats.httpUrl}/jsz`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
-  } catch (error) {
-    console.warn('Could not fetch JetStream info:', error);
-    return null;
-  }
+  return fetchMonitoring<Record<string, unknown>>('jsz');
 }
 
 export async function fetchActiveSubjects(): Promise<string[]> {
-  try {
-    const response = await fetch(`${config.nats.httpUrl}/connz?subs=1`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    
-    // Collect all unique subjects from all connections
-    const subjects = new Set<string>();
-    
-    if (Array.isArray(data.connections)) {
-      data.connections.forEach((conn: Record<string, unknown>) => {
-        if (Array.isArray(conn.subscriptions_list)) {
-          conn.subscriptions_list.forEach((sub: string) => subjects.add(sub));
-        }
-      });
-    }
-    
-    return Array.from(subjects).sort((a, b) => a.localeCompare(b));
-  } catch (error) {
-    console.warn('Could not fetch active subjects:', error);
-    return [];
+  const data = await fetchMonitoring<Record<string, unknown>>('connz', '?subs=1');
+  if (!data) return [];
+
+  const subjects = new Set<string>();
+  if (Array.isArray(data.connections)) {
+    (data.connections as Record<string, unknown>[]).forEach((conn) => {
+      if (Array.isArray(conn.subscriptions_list)) {
+        (conn.subscriptions_list as string[]).forEach((sub) => subjects.add(sub));
+      }
+    });
   }
+  return Array.from(subjects).sort((a, b) => a.localeCompare(b));
 }
 
-// JetStream Stream Management Functions
 export async function fetchJetStreamStreams(): Promise<Record<string, unknown>[]> {
-  try {
-    const response = await fetch(`${config.nats.httpUrl}/jsz?streams=1`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    
-    return data.streams || [];
-  } catch (error) {
-    console.warn('Could not fetch JetStream streams:', error);
-    return [];
-  }
+  const data = await fetchMonitoring<{ streams?: Record<string, unknown>[] }>('jsz', '?streams=1');
+  return data?.streams || [];
 }
 
 export async function fetchJetStreamStreamInfo(streamName: string): Promise<Record<string, unknown> | null> {
-  try {
-    const response = await fetch(`${config.nats.httpUrl}/jsz?stream=${streamName}`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    
-    return data.stream_detail || null;
-  } catch (error) {
-    console.warn(`Could not fetch stream info for ${streamName}:`, error);
-    return null;
-  }
+  const data = await fetchMonitoring<{ stream_detail?: Record<string, unknown> }>(
+    'jsz',
+    `?stream=${encodeURIComponent(streamName)}`,
+  );
+  return data?.stream_detail || null;
 }
 
-// JetStream Stream Management via NATS Connection
+export async function fetchAllConsumers(): Promise<Record<string, unknown>[]> {
+  const data = await fetchMonitoring<{ streams?: Record<string, unknown>[] }>('jsz', '?consumers=1');
+  if (!data) return [];
+
+  const consumers: Record<string, unknown>[] = [];
+  if (Array.isArray(data.streams)) {
+    data.streams.forEach((stream) => {
+      if (Array.isArray(stream.consumer_detail)) {
+        (stream.consumer_detail as Record<string, unknown>[]).forEach((consumer) => {
+          consumers.push({ ...consumer, stream_name: stream.name });
+        });
+      }
+    });
+  }
+  return consumers;
+}
+
+// ---- JetStream / KV management (proxied through the backend) -------------
+
 export class JetStreamManager {
-  private readonly connection: NatsConnection;
-  
-  constructor(connection: NatsConnection) {
-    this.connection = connection;
+  private readonly connectionId: string;
+
+  constructor(connectionId: string) {
+    this.connectionId = connectionId;
   }
 
-  async createStream(config: {
+  private base(): string {
+    return `/connections/${this.connectionId}`;
+  }
+
+  async createStream(streamConfig: {
     name: string;
     subjects: string[];
     description?: string;
@@ -234,150 +321,63 @@ export class JetStreamManager {
     maxAge: number;
     replicas: number;
   }): Promise<Record<string, unknown>> {
-    try {
-      // Convert to JetStream API format
-      const streamConfig = {
-        name: config.name,
-        subjects: config.subjects,
-        description: config.description,
-        retention: config.retention,
-        storage: config.storage,
-        max_msgs: config.maxMsgs,
-        max_bytes: config.maxBytes,
-        max_age: config.maxAge * 1000000000, // Convert to nanoseconds
-        num_replicas: config.replicas,
-      };
-
-      const response = await this.connection.request(
-        '$JS.API.STREAM.CREATE.' + config.name,
-        JSON.stringify(streamConfig),
-        { timeout: 5000 }
-      );
-
-      const result = JSON.parse(new TextDecoder().decode(response.data));
-      
-      if (result.error) {
-        throw new Error(`JetStream API error: ${result.error.description || result.error.message || 'Unknown error'}`);
-      }
-      
-      return result;
-    } catch (error) {
-      console.error('Failed to create stream:', error);
-      throw error;
-    }
+    return apiFetch<Record<string, unknown>>(`${this.base()}/streams`, {
+      method: 'POST',
+      body: JSON.stringify(streamConfig),
+    });
   }
 
   async deleteStream(streamName: string): Promise<void> {
-    try {
-      await this.connection.request(
-        '$JS.API.STREAM.DELETE.' + streamName,
-        JSON.stringify({}),
-        { timeout: 5000 }
-      );
-    } catch (error) {
-      console.error('Failed to delete stream:', error);
-      throw error;
-    }
+    await apiFetch(`${this.base()}/streams/${encodeURIComponent(streamName)}`, { method: 'DELETE' });
   }
 
   async listStreams(): Promise<Record<string, unknown>[]> {
-    try {
-      const response = await this.connection.request(
-        '$JS.API.STREAM.LIST',
-        JSON.stringify({}),
-        { timeout: 5000 }
-      );
-
-      const result = JSON.parse(new TextDecoder().decode(response.data));
-      
-      if (result.error) {
-        console.error('JetStream API error:', result.error);
-        return [];
-      }
-      
-      return result.streams || [];
-    } catch (error) {
-      console.error('Failed to list streams:', error);
-      return [];
-    }
+    const data = await apiFetch<{ streams: Record<string, unknown>[] }>(`${this.base()}/streams`);
+    return data.streams || [];
   }
 
   async getStreamInfo(streamName: string): Promise<Record<string, unknown> | null> {
     try {
-      const response = await this.connection.request(
-        '$JS.API.STREAM.INFO.' + streamName,
-        JSON.stringify({}),
-        { timeout: 5000 }
+      return await apiFetch<Record<string, unknown>>(
+        `${this.base()}/streams/${encodeURIComponent(streamName)}`,
       );
-
-      return JSON.parse(new TextDecoder().decode(response.data));
-    } catch (error) {
-      console.error('Failed to get stream info:', error);
+    } catch {
       return null;
     }
   }
 
-  // Consumer Management
   async listConsumers(streamName: string): Promise<Record<string, unknown>[]> {
     try {
-      const response = await this.connection.request(
-        `$JS.API.CONSUMER.LIST.${streamName}`,
-        JSON.stringify({}),
-        { timeout: 5000 }
+      const data = await apiFetch<{ consumers: Record<string, unknown>[] }>(
+        `${this.base()}/streams/${encodeURIComponent(streamName)}/consumers`,
       );
-
-      const result = JSON.parse(new TextDecoder().decode(response.data));
-      return result.consumers || [];
-    } catch (error) {
-      console.error('Failed to list consumers:', error);
+      return data.consumers || [];
+    } catch {
       return [];
     }
   }
 
   async getConsumerInfo(streamName: string, consumerName: string): Promise<Record<string, unknown> | null> {
     try {
-      const response = await this.connection.request(
-        `$JS.API.CONSUMER.INFO.${streamName}.${consumerName}`,
-        JSON.stringify({}),
-        { timeout: 5000 }
+      return await apiFetch<Record<string, unknown>>(
+        `${this.base()}/streams/${encodeURIComponent(streamName)}/consumers/${encodeURIComponent(consumerName)}`,
       );
-
-      return JSON.parse(new TextDecoder().decode(response.data));
-    } catch (error) {
-      console.error('Failed to get consumer info:', error);
+    } catch {
       return null;
     }
   }
 
   async deleteConsumer(streamName: string, consumerName: string): Promise<void> {
-    try {
-      await this.connection.request(
-        `$JS.API.CONSUMER.DELETE.${streamName}.${consumerName}`,
-        JSON.stringify({}),
-        { timeout: 5000 }
-      );
-    } catch (error) {
-      console.error('Failed to delete consumer:', error);
-      throw error;
-    }
+    await apiFetch(
+      `${this.base()}/streams/${encodeURIComponent(streamName)}/consumers/${encodeURIComponent(consumerName)}`,
+      { method: 'DELETE' },
+    );
   }
 
-  // KV Store Management
   async listKVBuckets(): Promise<string[]> {
     try {
-      // KV stores are implemented as streams with specific naming pattern
-      const streams = await this.listStreams();
-      return streams
-        .filter((stream) => {
-          const config = stream.config as Record<string, unknown> | undefined;
-          const name = config?.name;
-          return typeof name === 'string' && name.startsWith('KV_');
-        })
-        .map((stream) => {
-          const config = stream.config as Record<string, unknown>;
-          const name = config.name as string;
-          return name.replace('KV_', '');
-        });
+      const data = await apiFetch<{ buckets: string[] }>(`${this.base()}/kv`);
+      return data.buckets || [];
     } catch (error) {
       console.error('Failed to list KV buckets:', error);
       return [];
@@ -385,105 +385,22 @@ export class JetStreamManager {
   }
 
   async createKVBucket(name: string, ttl?: number): Promise<void> {
-    try {
-      const maxAge = ttl ? ttl * 1000000000 : 0; // Convert to nanoseconds
-      const duplicateWindow = maxAge > 0 ? Math.min(120000000000, maxAge) : 120000000000; // 2 minutes max or less than max_age
-      
-      const config = {
-        name: `KV_${name}`,
-        subjects: [`$KV.${name}.>`],
-        retention: 'limits' as const,
-        storage: 'file' as const,
-        max_msgs: -1,
-        max_bytes: -1,
-        max_age: maxAge,
-        max_msg_size: -1,
-        num_replicas: 1,
-        discard: 'new',
-        duplicate_window: maxAge > 0 ? duplicateWindow : 0, // Set to 0 when no max_age
-        allow_rollup_hdrs: true,
-        deny_delete: false,
-        // KV-specific configuration
-        max_msgs_per_subject: 1, // Only keep latest value per key
-        allow_direct: true, // Allow direct access
-      };
-
-      const response = await this.connection.request(
-        `$JS.API.STREAM.CREATE.KV_${name}`,
-        JSON.stringify(config),
-        { timeout: 5000 }
-      );
-
-      const result = JSON.parse(new TextDecoder().decode(response.data));
-      if (result.error) {
-        throw new Error(`JetStream API error: ${result.error.description}`);
-      }
-      
-    } catch (error) {
-      console.error('Failed to create KV bucket:', error);
-      throw error;
-    }
+    await apiFetch(`${this.base()}/kv`, {
+      method: 'POST',
+      body: JSON.stringify({ name, ttl }),
+    });
   }
 
   async deleteKVBucket(name: string): Promise<void> {
-    try {
-      await this.deleteStream(`KV_${name}`);
-    } catch (error) {
-      console.error('Failed to delete KV bucket:', error);
-      throw error;
-    }
+    await apiFetch(`${this.base()}/kv/${encodeURIComponent(name)}`, { method: 'DELETE' });
   }
 
   async getKVKeys(bucket: string): Promise<string[]> {
     try {
-      // Get stream info first to check if it exists
-      const streamInfo = await this.getStreamInfo(`KV_${bucket}`);
-      if (!streamInfo || !streamInfo.state) {
-        console.warn(`KV bucket ${bucket} not found`);
-        return [];
-      }
-
-      const state = streamInfo.state as Record<string, unknown>;
-      const messageCount = state.messages as number;
-      
-      if (messageCount === 0) {
-        return [];
-      }
-
-      // Get messages from the stream to find subjects (keys)
-      const keys = new Set<string>();
-      
-      // Use first_seq and last_seq to get the actual range
-      const firstSeq = state.first_seq as number;
-      const lastSeq = state.last_seq as number;
-      
-      // Fetch messages in the actual sequence range
-      for (let seq = firstSeq; seq <= lastSeq; seq++) {
-        try {
-          const response = await this.connection.request(
-            `$JS.API.STREAM.MSG.GET.KV_${bucket}`,
-            JSON.stringify({ seq }),
-            { timeout: 2000 }
-          );
-
-          const result = JSON.parse(new TextDecoder().decode(response.data));
-          
-          if (result.message?.subject) {
-            const subject = result.message.subject as string;
-            if (subject.startsWith(`$KV.${bucket}.`)) {
-              const key = subject.replace(`$KV.${bucket}.`, '');
-              if (key) {
-                keys.add(key);
-              }
-            }
-          }
-        } catch {
-          // Message might not exist at this sequence, continue
-          continue;
-        }
-      }
-
-      return Array.from(keys);
+      const data = await apiFetch<{ keys: string[] }>(
+        `${this.base()}/kv/${encodeURIComponent(bucket)}/keys`,
+      );
+      return data.keys || [];
     } catch (error) {
       console.error('Failed to get KV keys:', error);
       return [];
@@ -492,17 +409,10 @@ export class JetStreamManager {
 
   async getKVValue(bucket: string, key: string): Promise<string | null> {
     try {
-      const response = await this.connection.request(
-        `$JS.API.STREAM.MSG.GET.KV_${bucket}`,
-        JSON.stringify({ last_by_subj: `$KV.${bucket}.${key}` }),
-        { timeout: 5000 }
+      const data = await apiFetch<{ value: string | null }>(
+        `${this.base()}/kv/${encodeURIComponent(bucket)}/value?key=${encodeURIComponent(key)}`,
       );
-
-      const result = JSON.parse(new TextDecoder().decode(response.data));
-      if (result.message?.data) {
-        return atob(result.message.data);
-      }
-      return null;
+      return data.value;
     } catch (error) {
       console.error('Failed to get KV value:', error);
       return null;
@@ -510,72 +420,16 @@ export class JetStreamManager {
   }
 
   async putKVValue(bucket: string, key: string, value: string): Promise<void> {
-    try {
-      // Publish directly to the KV subject with proper headers
-      const headers = createHeaders();
-      headers.set('Nats-Msg-Id', `${bucket}-${key}-${Date.now()}`);
-      
-      this.connection.publish(
-        `$KV.${bucket}.${key}`,
-        new TextEncoder().encode(value),
-        { headers }
-      );
-      
-      // Small delay to ensure the message is processed
-      await new Promise(resolve => setTimeout(resolve, 100));
-    } catch (error) {
-      console.error('Failed to put KV value:', error);
-      throw error;
-    }
+    await apiFetch(`${this.base()}/kv/${encodeURIComponent(bucket)}/value`, {
+      method: 'PUT',
+      body: JSON.stringify({ key, value }),
+    });
   }
 
   async deleteKVKey(bucket: string, key: string): Promise<void> {
-    try {
-      // Publish empty message with KV-Operation header to delete the key
-      const headers = createHeaders();
-      headers.set('KV-Operation', 'DEL');
-      headers.set('Nats-Msg-Id', `${bucket}-${key}-del-${Date.now()}`);
-      
-      this.connection.publish(
-        `$KV.${bucket}.${key}`,
-        new Uint8Array(0),
-        { headers }
-      );
-      
-      // Small delay to ensure the message is processed
-      await new Promise(resolve => setTimeout(resolve, 100));
-    } catch (error) {
-      console.error('Failed to delete KV key:', error);
-      throw error;
-    }
-  }
-}
-
-// Fetch all consumers across all streams
-export async function fetchAllConsumers(): Promise<Record<string, unknown>[]> {
-  try {
-    const response = await fetch(`${config.nats.httpUrl}/jsz?consumers=1`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    
-    const consumers: Record<string, unknown>[] = [];
-    
-    if (data.streams) {
-      data.streams.forEach((stream: Record<string, unknown>) => {
-        if (stream.consumer_detail) {
-          (stream.consumer_detail as Record<string, unknown>[]).forEach((consumer: Record<string, unknown>) => {
-            consumers.push({
-              ...consumer,
-              stream_name: stream.name
-            });
-          });
-        }
-      });
-    }
-    
-    return consumers;
-  } catch (error) {
-    console.warn('Could not fetch consumers:', error);
-    return [];
+    await apiFetch(
+      `${this.base()}/kv/${encodeURIComponent(bucket)}/value?key=${encodeURIComponent(key)}`,
+      { method: 'DELETE' },
+    );
   }
 }

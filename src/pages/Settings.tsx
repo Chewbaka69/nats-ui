@@ -23,6 +23,7 @@ import { Badge } from '../components/ui/badge';
 import { useNats } from '../hooks/useNats';
 import { toast } from 'sonner';
 import { config as defaultConfig } from '../config';
+import { fetchNatsInfo } from '../services/nats-service';
 
 const connectionSchema = z.object({
   server: z.string().min(1, 'Server URL is required'),
@@ -77,17 +78,13 @@ export function Settings() {
     setHttpError(null);
 
     try {
-      // Test the HTTP endpoint (usually /varz for NATS monitoring)
-      const testUrl = httpUrl.endsWith('/') ? `${httpUrl}varz` : `${httpUrl}/varz`;
-      const response = await fetch(testUrl, {
-        method: 'GET',
-      });
-
-      if (response.ok) {
+      // Monitoring is proxied by the backend (browser can't reach NATS directly).
+      const info = await fetchNatsInfo();
+      if (info) {
         setHttpStatus('available');
       } else {
         setHttpStatus('error');
-        setHttpError(`HTTP ${response.status}: ${response.statusText}`);
+        setHttpError('Monitoring endpoint unreachable from the backend');
       }
     } catch (err) {
       setHttpStatus('error');
@@ -272,16 +269,16 @@ export function Settings() {
                     <div className="space-y-4">
                         <div className="grid gap-4 md:grid-cols-2">
                             <div className="space-y-2">
-                                <Label htmlFor="server">WebSocket Server URL</Label>
+                                <Label htmlFor="server">NATS Server URL</Label>
                                 <Input
                                     id="server"
-                                    placeholder="ws://localhost:9222"
+                                    placeholder="nats://localhost:4222"
                                     autoComplete="off"
                                     data-form-type="other"
                                     {...form.register('server')}
                                 />
                                 <p className="text-sm text-muted-foreground">
-                                    WebSocket URL for real-time NATS connections
+                                    Resolved from the backend server, not the browser
                                 </p>
                                 {form.formState.errors.server && (
                                     <p className="text-sm text-red-600">
@@ -467,7 +464,7 @@ export function Settings() {
                                     status === 'connecting' ? 'bg-yellow-500 animate-pulse' :
                                     status === 'error' ? 'bg-red-500' : 'bg-gray-400'
                                 }`}></div>
-                                <span className="text-sm font-medium">WebSocket Server</span>
+                                <span className="text-sm font-medium">NATS Server</span>
                                 {status === 'connecting' && (
                                     <div className="animate-spin h-3 w-3 border border-blue-600 border-t-transparent rounded-full" />
                                 )}

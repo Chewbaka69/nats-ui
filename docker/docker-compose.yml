@@ -1,32 +1,37 @@
 services:
-  # NATS Server with JetStream and WebSocket
+  # NATS Server with JetStream
   nats:
     image: nats:2-alpine
     container_name: nats-server
-    command: ["-c", "/etc/nats/nats.conf"]
+    command: ['-c', '/etc/nats/nats.conf']
     ports:
-      - "4222:4222"   # NATS client connections
-      - "8222:8222"   # HTTP monitoring API
-      - "9222:9222"   # WebSocket connections
+      - '4222:4222' # NATS client connections
+      - '8222:8222' # HTTP monitoring API
     volumes:
       - ./nats.conf:/etc/nats/nats.conf:ro
       - nats_data:/data
     restart: unless-stopped
 
-  # NATS UI Application
+  # NATS UI Application (frontend + backend API server)
   nats-ui:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: ghcr.io/gastbob40/nats-ui:latest
+      args:
+        # The backend reaches NATS over the internal Docker network, so the UI's
+        # default target points at the `nats` service, not localhost.
+        VITE_NATS_URL: nats://nats:4222
+        VITE_NATS_HTTP_URL: http://nats:8222
+    image: ghcr.io/chewbaka69/nats-ui:latest
     container_name: nats-ui
     ports:
-      - "3000:3000"
+      - '3000:3000'
     depends_on:
       - nats
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000"]
+      test:
+        ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3000/api/health']
       interval: 30s
       timeout: 5s
       retries: 3

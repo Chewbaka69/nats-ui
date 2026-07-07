@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { connect, StringCodec } from 'nats';
+import { connect } from '@nats-io/transport-node';
 
 async function testPublish() {
   try {
@@ -11,9 +11,7 @@ async function testPublish() {
     });
 
     console.log('✅ Connected to NATS');
-    
-    const sc = StringCodec();
-    
+
     // Test message
     const testMessage = {
       id: Date.now(),
@@ -24,7 +22,7 @@ async function testPublish() {
     
     // Publish to users.new
     console.log('📤 Publishing to users.new:', testMessage);
-    nc.publish('users.new', sc.encode(JSON.stringify(testMessage)));
+    nc.publish('users.new', JSON.stringify(testMessage));
     
     console.log('✅ Message published successfully');
     

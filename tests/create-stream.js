@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { connect, StringCodec } from 'nats';
+import { connect } from '@nats-io/transport-node';
 
 async function createUsersStream() {
   try {
