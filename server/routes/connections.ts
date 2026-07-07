@@ -57,6 +57,52 @@ connectionsRoutes.post('/:id/publish', async (c) => {
   }
 });
 
+type MonitoringResult =
+  | { ok: true; data: unknown }
+  | { ok: false; status: number; error: string };
+
+// Fetch the NATS HTTP monitoring API (varz/connz/jsz/healthz) server-side, using
+// the httpUrl stored with the connection. The browser never contacts the
+// monitoring endpoint directly — it only ever talks to this backend.
+async function fetchMonitoring(
+  httpUrl: string,
+  what: string,
+  search?: Record<string, string>,
+): Promise<MonitoringResult> {
+  if (!ALLOWED_MONITORING.has(what)) {
+    return { ok: false, status: 400, error: `Unsupported monitoring endpoint: ${what}` };
+  }
+
+  const base = httpUrl.replace(/\/+$/, '');
+  const url = new URL(`${base}/${what}`);
+  if (search) {
+    for (const [key, value] of Object.entries(search)) {
+      url.searchParams.set(key, value);
+    }
+  }
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return { ok: false, status: 502, error: `HTTP ${res.status}` };
+    return { ok: true, data: await res.json() };
+  } catch (err) {
+    return { ok: false, status: 502, error: err instanceof Error ? err.message : 'Monitoring fetch failed' };
+  }
+}
+
+// Report whether the NATS HTTP monitoring API is reachable. The probe runs
+// server-side (like the NATS connection itself); the UI only displays the
+// result instead of calling the monitoring endpoint from the browser.
+connectionsRoutes.get('/:id/monitoring-status', async (c) => {
+  const entry = getConnection(c.req.param('id'));
+  if (!entry) return c.json({ error: 'Connection not found' }, 404);
+  if (!entry.httpUrl) return c.json({ status: 'unconfigured' });
+
+  const result = await fetchMonitoring(entry.httpUrl, 'healthz');
+  if (result.ok) return c.json({ status: 'available' });
+  return c.json({ status: 'error', error: result.error });
+});
+
 // Proxy the NATS HTTP monitoring API (varz/connz/jsz) using the httpUrl stored
 // with the connection. Query params are forwarded (e.g. ?streams=1, ?subs=1).
 connectionsRoutes.get('/:id/monitoring/:what', async (c) => {
@@ -64,23 +110,7 @@ connectionsRoutes.get('/:id/monitoring/:what', async (c) => {
   if (!entry) return c.json({ error: 'Connection not found' }, 404);
   if (!entry.httpUrl) return c.json({ error: 'No monitoring URL configured' }, 400);
 
-  const what = c.req.param('what');
-  if (!ALLOWED_MONITORING.has(what)) {
-    return c.json({ error: `Unsupported monitoring endpoint: ${what}` }, 400);
-  }
-
-  const base = entry.httpUrl.replace(/\/+$/, '');
-  const url = new URL(`${base}/${what}`);
-  for (const [key, value] of Object.entries(c.req.query())) {
-    url.searchParams.set(key, value);
-  }
-
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return c.json({ error: `HTTP ${res.status}` }, 502);
-    const data = await res.json();
-    return c.json(data);
-  } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : 'Monitoring fetch failed' }, 502);
-  }
+  const result = await fetchMonitoring(entry.httpUrl, c.req.param('what'), c.req.query());
+  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 502);
+  return c.json(result.data);
 });
