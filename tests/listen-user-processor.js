@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { connect } from 'nats';
+import { connect } from '@nats-io/transport-node';
+import { jetstream } from '@nats-io/jetstream';
 
 async function listenUserProcessor() {
   try {
@@ -20,7 +21,7 @@ async function listenUserProcessor() {
     console.log('---');
 
     // Get JetStream context
-    const js = nc.jetstream();
+    const js = jetstream(nc);
 
     try {
       // Get the consumer using the pull approach (like user-analytics)

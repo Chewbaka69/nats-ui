@@ -13,6 +13,16 @@ const packageJson = JSON.parse(
 export default defineConfig(({ mode }) => ({
   base: process.env.VITE_BASE_PATH || '/',
   plugins: [react(), tailwindcss(),],
+  server: {
+    // Proxy API + WebSocket to the backend during development.
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_TARGET || 'http://localhost:3000',
+        changeOrigin: true,
+        ws: true,
+      },
+    },
+  },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL('./src', import.meta.url)),

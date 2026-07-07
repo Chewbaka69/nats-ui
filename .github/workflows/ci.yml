@@ -64,7 +64,11 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v2
         with:
-          version: latest
+          # Pin to pnpm 10.x: the repo approves dependency builds via
+          # `onlyBuiltDependencies` in pnpm-workspace.yaml, which pnpm 11
+          # removed (renamed to `allowBuilds`). Floating to `latest` pulled
+          # pnpm 11 and broke `pnpm install` on esbuild's build script.
+          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

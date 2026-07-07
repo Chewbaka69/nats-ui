@@ -48,7 +48,7 @@ export function NatsProvider({ children }: NatsProviderProps) {
     setError(null);
 
     try {
-      const service = await createNatsService([config.server]);
+      const service = await createNatsService(config);
 
       setConnection(service);
       setStatus('connected');

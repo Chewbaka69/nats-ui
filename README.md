@@ -8,7 +8,7 @@
 
 <p align="center">
   <strong>
-    🎯 Zero Config • 🚀 Real-time Everything • 📊 Built for DevOps • 🔌 WebSocket Native
+    🎯 Zero Config • 🚀 Real-time Everything • 📊 Built for DevOps • 🔌 Server-side NATS
   </strong>
 </p>
 
@@ -119,10 +119,13 @@ This setup includes:
 - **Health checks** and auto-restart
 
 **Ports exposed:**
-- `3000` - NATS UI Web Interface
-- `4222` - NATS Client connections  
-- `8222` - NATS HTTP Monitoring API
-- `9222` - NATS WebSocket connections
+- `3000` - NATS UI Web Interface (the only port a browser needs)
+- `4222` - NATS Client connections (used by the NATS UI **backend**, not the browser)
+- `8222` - NATS HTTP Monitoring API (proxied by the backend)
+
+> The browser only talks to the NATS UI backend on port `3000`. The backend
+> holds the NATS connection, so NATS itself never needs to be reachable from
+> the browser — a WebSocket listener (previously port `9222`) is no longer required.
 
 ### Using your own NATS Server
 
@@ -141,15 +144,20 @@ Then configure the connection in the UI settings to point to your NATS server.
 
 ### Connect to Your NATS Server
 
-NATS UI requires **3 ports** from your NATS server:
+The NATS UI **backend** connects to your NATS server (the browser never does):
 
 | Port | Purpose | Required |
 |------|---------|----------|
-| **4222** | NATS client connections | ✅ |
-| **8222** | HTTP monitoring API | ✅ |
-| **9222** | WebSocket for real-time | ✅ |
+| **4222** | NATS client connections (backend → NATS) | ✅ |
+| **8222** | HTTP monitoring API (backend → NATS) | ⚪️ optional (metrics) |
 
-The UI will auto-connect to `localhost` by default. To connect to a different server, use the Settings page in the app.
+Because the backend performs the connection, the NATS address is resolved from
+the **server** running NATS UI. This means you can point it at a NATS instance
+that is only reachable server-side (e.g. `nats://localhost:4222` on the same host,
+or `nats://nats:4222` on an internal network) without exposing NATS to browsers.
+
+The UI auto-connects using the configured default. To connect to a different
+server, use the Settings page in the app.
 
 ## Requirements
 
@@ -171,9 +179,10 @@ The UI will auto-connect to `localhost` by default. To connect to a different se
 - **Vite** - Next-generation frontend build tool
 - **pnpm** - Fast, disk space efficient package manager
 
-**NATS Integration:**
-- **nats.ws** - WebSocket-based NATS client for browsers
-- **@tanstack/react-query** - Powerful data synchronization
+**Backend / NATS Integration:**
+- **Hono** - Lightweight server (`@hono/node-server`) that serves the UI and the `/api` layer
+- **@nats-io/transport-node** - Official Node NATS client, owns the connection server-side (with `@nats-io/jetstream` + `@nats-io/kv` for JetStream & KV)
+- **WebSocket** - Real-time subscriptions multiplexed from the backend to the browser
 
 **State & Routing:**
 - **React Router v7** - Declarative routing for React

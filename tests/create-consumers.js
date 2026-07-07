@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { connect } from 'nats';
+import { connect } from '@nats-io/transport-node';
+import { jetstreamManager } from '@nats-io/jetstream';
 
 async function createConsumers() {
   try {
@@ -12,9 +13,6 @@ async function createConsumers() {
 
     console.log('✅ NATS connected');
     console.log('🔧 Creating JetStream consumers...');
-
-    // Get JetStream context
-    const js = nc.jetstream();
 
     // List of consumers to create
     const consumers = [
@@ -65,7 +63,7 @@ async function createConsumers() {
         console.log(`📤 Creating consumer "${consumer.name}" for stream "${consumer.stream}"...`);
 
         // Use JetStream manager API
-        const jsm = await js.jetstreamManager();
+        const jsm = await jetstreamManager(nc);
         const ci = await jsm.consumers.add(consumer.stream, consumer.config);
         
         console.log(`✅ Consumer "${consumer.name}" created successfully!`);

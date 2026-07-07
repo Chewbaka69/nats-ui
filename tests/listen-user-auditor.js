@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { connect } from 'nats';
+import { connect } from '@nats-io/transport-node';
+import { jetstreamManager } from '@nats-io/jetstream';
 
 async function listenUserAuditor() {
   try {
@@ -19,12 +20,9 @@ async function listenUserAuditor() {
     console.log('💡 Publish messages to "users.*" to see them here');
     console.log('---');
 
-    // Get JetStream context
-    const js = nc.jetstream();
-
     try {
       // Get the consumer to verify it exists and get its configuration
-      const jsm = await js.jetstreamManager();
+      const jsm = await jetstreamManager(nc);
       let consumerInfo;
       try {
         consumerInfo = await jsm.consumers.info('USERS', 'user-auditor');
