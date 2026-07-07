@@ -112,6 +112,13 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
+      - name: Lowercase image name
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.version-changed == 'true'
+        run: |
+          # GHCR repository names must be lowercase, but github.repository
+          # preserves the owner's casing (e.g. Chewbaka69/nats-ui).
+          echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+
       - name: Log in to the Container registry
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.version-changed == 'true'
         uses: docker/login-action@v3
@@ -134,8 +141,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.package-version.outputs.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:v${{ steps.package-version.outputs.VERSION }}
 
       - name: Create Git tag
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.version-changed == 'true'
