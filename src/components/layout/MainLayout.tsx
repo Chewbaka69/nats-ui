@@ -46,6 +46,7 @@ import {
 } from '../ui/sidebar';
 import { Button } from '../ui/button';
 import { useNats } from '../../hooks/useNats';
+import { fetchMonitoringStatus } from '../../services/nats-service';
 import { Badge } from '../ui/badge';
 import { useState, useCallback, useEffect } from 'react';
 
@@ -127,21 +128,19 @@ export function MainLayout() {
     }
 
     setHttpStatus('checking');
-    try {
-      const testUrl = httpUrl.endsWith('/') ? `${httpUrl}varz` : `${httpUrl}/varz`;
-      const response = await fetch(testUrl, { method: 'GET' });
-      setHttpStatus(response.ok ? 'available' : 'error');
-    } catch {
-      setHttpStatus('error');
-    }
+    // The reachability probe runs on the backend; the browser never contacts
+    // the NATS monitoring endpoint directly.
+    const result = await fetchMonitoringStatus();
+    if (!result) return; // no active connection yet — keep "checking"
+    setHttpStatus(result.status);
   }, []);
 
   useEffect(() => {
-    const httpUrl = natsConfig.httpUrl;
-    if (!httpUrl) return;
-    const run = async () => { await checkHttpStatus(httpUrl); };
+    if (!natsConfig.httpUrl) return;
+    if (status !== 'connected') return;
+    const run = async () => { await checkHttpStatus(natsConfig.httpUrl!); };
     run();
-  }, [natsConfig.httpUrl, checkHttpStatus]);
+  }, [natsConfig.httpUrl, status, checkHttpStatus]);
 
   const cycleTheme = () => {
     if (theme === 'light') setTheme('dark');
