@@ -138,11 +138,18 @@ jobs:
           context: .
           file: ./docker/Dockerfile
           platforms: linux/amd64,linux/arm64
+          # Actually push to GHCR. Without this, build-push-action defaults to
+          # push: false and the image only lands in the build cache ("No output
+          # specified with docker-container driver"), so nothing reaches ghcr.io.
+          push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:v${{ steps.package-version.outputs.VERSION }}
+          # Link the GHCR package to this repo so it shows under the repo's Packages.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Create Git tag
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.version-changed == 'true'
