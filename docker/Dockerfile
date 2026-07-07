@@ -2,12 +2,15 @@
 FROM node:24-alpine AS builder
 
 # Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm 10.x: build-script approval lives in pnpm-workspace.yaml under
+# `onlyBuiltDependencies`, which pnpm 11 removed (renamed to `allowBuilds`).
+RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 
 WORKDIR /app
 
-# Install dependencies
-COPY package.json pnpm-lock.yaml ./
+# Install dependencies. pnpm-workspace.yaml carries the onlyBuiltDependencies
+# allowlist (esbuild), so it must be present for this install layer.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 # Build the frontend. Default NATS target can be baked in via build args
@@ -22,14 +25,16 @@ RUN pnpm build
 # Production stage: Node server that serves the built frontend and the API
 FROM node:24-alpine AS runner
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm 10.x: build-script approval lives in pnpm-workspace.yaml under
+# `onlyBuiltDependencies`, which pnpm 11 removed (renamed to `allowBuilds`).
+RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
 # Install production dependencies only (includes hono, nats, tsx)
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --prod --frozen-lockfile
 
 # Copy the built frontend and the backend source
