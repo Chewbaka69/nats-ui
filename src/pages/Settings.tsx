@@ -23,7 +23,7 @@ import { Badge } from '../components/ui/badge';
 import { useNats } from '../hooks/useNats';
 import { toast } from 'sonner';
 import { config as defaultConfig } from '../config';
-import { fetchNatsInfo } from '../services/nats-service';
+import { fetchMonitoringStatus } from '../services/nats-service';
 
 const connectionSchema = z.object({
   server: z.string().min(1, 'Server URL is required'),
@@ -77,27 +77,32 @@ export function Settings() {
     setHttpStatus('checking');
     setHttpError(null);
 
-    try {
-      // Monitoring is proxied by the backend (browser can't reach NATS directly).
-      const info = await fetchNatsInfo();
-      if (info) {
-        setHttpStatus('available');
-      } else {
-        setHttpStatus('error');
-        setHttpError('Monitoring endpoint unreachable from the backend');
-      }
-    } catch (err) {
+    // The reachability probe runs on the backend; the browser only reads the
+    // result and never contacts the NATS monitoring endpoint directly.
+    const result = await fetchMonitoringStatus();
+    if (!result) {
+      // No active connection yet — nothing to probe against.
+      setHttpStatus('checking');
+      return;
+    }
+    if (result.status === 'available') {
+      setHttpStatus('available');
+      setHttpError(null);
+    } else if (result.status === 'unconfigured') {
+      setHttpStatus('unconfigured');
+      setHttpError(null);
+    } else {
       setHttpStatus('error');
-      setHttpError(err instanceof Error ? err.message : 'Connection failed');
+      setHttpError(result.error ?? 'Monitoring endpoint unreachable from the backend');
     }
   }, []);
 
   useEffect(() => {
-    const httpUrl = config.httpUrl;
-    if (!httpUrl) return;
-    const run = async () => { await checkHttpStatus(httpUrl); };
+    if (!config.httpUrl) return;
+    if (status !== 'connected') return;
+    const run = async () => { await checkHttpStatus(config.httpUrl!); };
     run();
-  }, [config.httpUrl, checkHttpStatus]);
+  }, [config.httpUrl, status, checkHttpStatus]);
 
   const form = useForm<ConnectionFormData>({
     resolver: zodResolver(connectionSchema),

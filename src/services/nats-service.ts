@@ -240,6 +240,24 @@ async function fetchMonitoring<T>(what: string, query = ''): Promise<T | null> {
   }
 }
 
+export type MonitoringStatus = 'available' | 'error' | 'unconfigured';
+
+/**
+ * Ask the backend whether the NATS HTTP monitoring API is reachable. The actual
+ * probe runs server-side; the browser only reads the result (it never contacts
+ * the monitoring endpoint itself). Returns null when there is no active connection.
+ */
+export async function fetchMonitoringStatus(): Promise<{ status: MonitoringStatus; error?: string } | null> {
+  if (!activeConnectionId) return null;
+  try {
+    const response = await fetch(apiUrl(`/connections/${activeConnectionId}/monitoring-status`));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return (await response.json()) as { status: MonitoringStatus; error?: string };
+  } catch (error) {
+    return { status: 'error', error: error instanceof Error ? error.message : 'Status check failed' };
+  }
+}
+
 export async function fetchNatsInfo(): Promise<Record<string, unknown> | null> {
   return fetchMonitoring<Record<string, unknown>>('varz');
 }
