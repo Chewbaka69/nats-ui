@@ -45,6 +45,7 @@ import { useNats } from '../hooks/useNats';
 import { toast } from 'sonner';
 import { fetchActiveSubjects } from '../services/nats-service';
 import { subjectTracker, type SubjectActivity } from '../services/subject-tracker';
+import { getCustomTopics, addCustomTopic } from '../services/custom-topics';
 import { TopicSkeleton } from '../components/ui/skeletons';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
@@ -229,7 +230,8 @@ interface Subscription {
 
 
 const MessagesComponent = function Messages() {
-  const { connection, isConnected } = useNats();
+  const { connection, isConnected, config: natsConfig } = useNats();
+  const server = natsConfig.server;
   const [messages, setMessages] = useState<Message[]>([]);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
@@ -567,13 +569,15 @@ const MessagesComponent = function Messages() {
         Promise.resolve(subjectTracker.getSubjects().map(s => s.subject))
       ]);
       
-      // Combine and deduplicate using Set for optimal performance
-      const allTopicsSet = new Set([...serverTopicsSet, ...subjectTrackerTopics]);
+      // Combine and deduplicate using Set for optimal performance.
+      // Custom topics (persisted in localStorage) are merged in so manually
+      // added topics survive a page reload even without server-side activity.
+      const allTopicsSet = new Set([...serverTopicsSet, ...subjectTrackerTopics, ...getCustomTopics(server)]);
       const newTopics = Array.from(allTopicsSet).sort();
-      
+
       // Smart comparison using hash to prevent unnecessary re-renders
       const newHash = createTopicsHash(newTopics);
-      
+
       if (newHash !== lastTopicsHash.current) {
         lastTopicsHash.current = newHash;
         setTopics(newTopics);
@@ -583,7 +587,7 @@ const MessagesComponent = function Messages() {
     } finally {
       setIsLoadingTopics(false);
     }
-  }, [isConnected, fetchServerTopics, createTopicsHash]);
+  }, [isConnected, fetchServerTopics, createTopicsHash, server]);
 
   // Smart polling with different intervals for different sources
   useEffect(() => {
@@ -599,10 +603,10 @@ const MessagesComponent = function Messages() {
       try {
         const serverTopicsSet = await fetchServerTopics();
         const subjectTrackerTopics = subjectTracker.getSubjects().map(s => s.subject);
-        const allTopicsSet = new Set([...serverTopicsSet, ...subjectTrackerTopics]);
+        const allTopicsSet = new Set([...serverTopicsSet, ...subjectTrackerTopics, ...getCustomTopics(server)]);
         const newTopics = Array.from(allTopicsSet).sort();
         const newHash = createTopicsHash(newTopics);
-        
+
         if (newHash !== lastTopicsHash.current) {
           lastTopicsHash.current = newHash;
           setTopics(newTopics);
@@ -611,9 +615,9 @@ const MessagesComponent = function Messages() {
         console.error('Failed to update server topics:', error);
       }
     }, 30000);
-    
+
     return () => clearInterval(serverInterval);
-  }, [isConnected, fetchServerTopics, createTopicsHash, fetchTopics]);
+  }, [isConnected, fetchServerTopics, createTopicsHash, fetchTopics, server]);
 
   // Handle responsive collapse state for publish card
   useEffect(() => {
@@ -671,10 +675,10 @@ const MessagesComponent = function Messages() {
           // Get fresh subject tracker topics and combine with cached server topics
           const subjectTrackerTopics = subjectTracker.getSubjects().map(s => s.subject);
           const serverTopicsSet = serverTopicsCache.current.topics;
-          const allTopicsSet = new Set([...serverTopicsSet, ...subjectTrackerTopics]);
+          const allTopicsSet = new Set([...serverTopicsSet, ...subjectTrackerTopics, ...getCustomTopics(server)]);
           const newTopics = Array.from(allTopicsSet).sort();
           const newHash = createTopicsHash(newTopics);
-          
+
           if (newHash !== lastTopicsHash.current) {
             lastTopicsHash.current = newHash;
             setTopics(newTopics);
@@ -684,12 +688,12 @@ const MessagesComponent = function Messages() {
         }
       }, debounceDelay);
     });
-    
+
     return () => {
       clearTimeout(debounceTimeout);
       unsubscribe();
     };
-  }, [isConnected, createTopicsHash]);
+  }, [isConnected, createTopicsHash, server]);
 
 
   if (!isConnected) {
@@ -752,8 +756,8 @@ const MessagesComponent = function Messages() {
                         const freshServerTopics = await fetchActiveSubjects();
                         const subjectTrackerTopics = subjectTracker.getSubjects().map(s => s.subject);
 
-                        // Combine and update
-                        const allTopicsSet = new Set([...freshServerTopics, ...subjectTrackerTopics]);
+                        // Combine and update (keep persisted custom topics)
+                        const allTopicsSet = new Set([...freshServerTopics, ...subjectTrackerTopics, ...getCustomTopics(server)]);
                         const newTopics = Array.from(allTopicsSet).sort();
                         setTopics(newTopics);
 
@@ -1063,8 +1067,10 @@ const MessagesComponent = function Messages() {
                 onChange={(e) => setNewTopicName(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && newTopicName.trim()) {
-                    setTopics(prev => [...new Set([...prev, newTopicName.trim()])].sort());
-                    setSelectedTopic(newTopicName.trim());
+                    const topic = newTopicName.trim();
+                    addCustomTopic(server, topic);
+                    setTopics(prev => [...new Set([...prev, topic])].sort());
+                    setSelectedTopic(topic);
                     setIsAddTopicOpen(false);
                     setNewTopicName('');
                   }
@@ -1085,8 +1091,10 @@ const MessagesComponent = function Messages() {
             <Button
               onClick={() => {
                 if (newTopicName.trim()) {
-                  setTopics(prev => [...new Set([...prev, newTopicName.trim()])].sort());
-                  setSelectedTopic(newTopicName.trim());
+                  const topic = newTopicName.trim();
+                  addCustomTopic(server, topic);
+                  setTopics(prev => [...new Set([...prev, topic])].sort());
+                  setSelectedTopic(topic);
                   setIsAddTopicOpen(false);
                   setNewTopicName('');
                 }
